@@ -1,0 +1,5 @@
+this is pre-text
+--- PRE ---
+this is central text
+--- POST ---
+this is post text
