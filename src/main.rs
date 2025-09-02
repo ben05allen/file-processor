@@ -175,23 +175,113 @@ fn main() {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
+
+    struct TestHandler {
+        label: String,
+        captured_output: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestHandler {
+        fn new(label: &str, captured_output: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                label: label.to_string(),
+                captured_output,
+            }
+        }
+    }
+
+    impl BlockHandler for TestHandler {
+        fn handle(&self, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+            let output = format!(
+                "=== Start: {} ===\n{}\n===  End: {}  ===\n",
+                self.label, content, self.label
+            );
+            self.captured_output.lock().unwrap().push(output);
+            Ok(())
+        }
+    }
+
+    struct TestFileProcessor {
+        captured_output: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl TestFileProcessor {
+        fn new() -> Self {
+            let captured_output = Arc::new(Mutex::new(Vec::new()));
+            Self { captured_output }
+        }
+
+        fn get_output(&self) -> Vec<String> {
+            self.captured_output.lock().unwrap().clone()
+        }
+
+        fn process_file<P: AsRef<std::path::Path>>(
+            &self,
+            path: P,
+            pre_sentinel: &str,
+            post_sentinel: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let file = std::fs::File::open(path).expect("failed to open file");
+            let reader = std::io::BufReader::new(file);
+
+            let processor = FileProcessor {
+                pre_handler: Box::new(TestHandler::new("PRE-BLOCK", self.captured_output.clone())),
+                central_handler: Some(Box::new(TestHandler::new(
+                    "CENTRAL-BLOCK",
+                    self.captured_output.clone(),
+                ))),
+                post_handler: Some(Box::new(TestHandler::new(
+                    "POST-BLOCK",
+                    self.captured_output.clone(),
+                ))),
+            };
+
+            let mut parser = FileParser::new(pre_sentinel, post_sentinel);
+
+            for line in reader.lines() {
+                let line = line.unwrap();
+                parser.process_line(&line, &processor)?;
+            }
+
+            parser.finish(&processor)?;
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_all_blocks() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "pre-block line 1").unwrap();
-        writeln!(file, "pre_block line 2").unwrap();
+        writeln!(file, "pre-block line 2").unwrap();
         writeln!(file, "*pre*").unwrap();
         writeln!(file, "central-block line 1").unwrap();
         writeln!(file, "*post*").unwrap();
         writeln!(file, "post-block line 1").unwrap();
 
-        let processor = FileProcessor::new();
+        let processor = TestFileProcessor::new();
 
         processor
             .process_file(file.path(), "*pre*", "*post*")
             .unwrap();
+
+        let output = processor.get_output();
+
+        assert_eq!(output.len(), 3);
+
+        assert!(output[0].contains("=== Start: PRE-BLOCK ==="));
+        assert!(output[0].contains("pre-block line 1"));
+        assert!(output[0].contains("pre-block line 2"));
+        assert!(output[0].contains("===  End: PRE-BLOCK  ==="));
+
+        assert!(output[1].contains("=== Start: CENTRAL-BLOCK ==="));
+        assert!(output[1].contains("central-block line 1"));
+        assert!(output[1].contains("===  End: CENTRAL-BLOCK  ==="));
+
+        assert!(output[2].contains("=== Start: POST-BLOCK ==="));
+        assert!(output[2].contains("post-block line 1"));
+        assert!(output[2].contains("===  End: POST-BLOCK  ==="));
     }
 
     #[test]
@@ -200,9 +290,21 @@ mod tests {
         writeln!(file, "Only pre-block content").unwrap();
         writeln!(file, "More pre_block").unwrap();
 
-        let processor = FileProcessor::new();
+        let processor = TestFileProcessor::new();
         processor
             .process_file(file.path(), "*pre*", "*post*")
             .unwrap();
+
+        let output = processor.get_output();
+
+        assert_eq!(output.len(), 1);
+
+        assert!(output[0].contains("=== Start: PRE-BLOCK ==="));
+        assert!(output[0].contains("Only pre-block content"));
+        assert!(output[0].contains("More pre_block"));
+        assert!(output[0].contains("===  End: PRE-BLOCK  ==="));
+
+        assert!(!output[0].contains("===  End: CENTRAL-BLOCK  ==="));
+        assert!(!output[0].contains("=== Start: POST-BLOCK ==="));
     }
 }
